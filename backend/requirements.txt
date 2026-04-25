@@ -1,15 +1,16 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-sqlalchemy==2.0.35
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt>=4.0.0
-python-multipart==0.0.12
-pydantic[email]==2.9.2
-yfinance>=0.2.44
-groq==0.11.0
-python-dotenv==1.0.1
-httpx==0.27.2
-requests==2.32.3
-email-validator==2.3.0
-pandas>=1.3.0
+echo fastapi==0.115.0 > D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo uvicorn[standard]==0.30.6 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo sqlalchemy==2.0.35 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo python-jose[cryptography]==3.3.0 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo passlib[bcrypt]==1.7.4 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo bcrypt==4.0.1 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo python-multipart==0.0.12 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo pydantic[email]==2.6.4 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo yfinance==0.2.44 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo groq==0.11.0 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo python-dotenv==1.0.1 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo httpx==0.27.2 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo requests==2.32.3 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo email-validator==2.1.2 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo pandas==2.2.2 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
+echo numpy==1.26.4 >> D:\stocksense_v5_fixed\stocksense_v5_fixed\backend\requirements.txt
