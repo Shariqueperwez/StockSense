@@ -5,6 +5,7 @@ from database import engine, Base
 import models
 from routes import auth, market, ai, portfolio, watchlist
 import threading
+import os
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -28,9 +29,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="StockSense — AI Stock Platform", lifespan=lifespan)
 
+# CORS — reads ALLOWED_ORIGINS env var on Render
+# Set ALLOWED_ORIGINS=https://your-app.vercel.app in Render dashboard
+# Leave it unset locally and it defaults to allow all (["*"])
+_raw = os.environ.get("ALLOWED_ORIGINS", "")
+allowed_origins = [o.strip() for o in _raw.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,7 +53,11 @@ app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"]
 def read_root():
     return {"message": "StockSense API — Running"}
 
+# Keep-alive endpoint — prevents Render free tier from sleeping
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
