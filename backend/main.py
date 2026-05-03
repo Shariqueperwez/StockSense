@@ -7,9 +7,13 @@ from routes import auth, market, ai, portfolio, watchlist
 import threading
 import os
 
-models.Base.metadata.create_all(bind=engine)
+try:
+    models.Base.metadata.create_all(bind=engine)
+    print("[StockSense] Database tables created/verified successfully.")
+except Exception as e:
+    print(f"[StockSense] FATAL: Could not connect to database: {e}")
+    raise
 
-# Pre-warm market movers cache on startup so first load is instant
 def _prewarm():
     try:
         from services.market_service import get_market_movers, get_heatmap_data
@@ -21,17 +25,12 @@ def _prewarm():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: pre-warm cache in background thread
     thread = threading.Thread(target=_prewarm, daemon=True)
     thread.start()
     yield
-    # Shutdown (nothing to clean up)
 
 app = FastAPI(title="StockSense — AI Stock Platform", lifespan=lifespan)
 
-# CORS — reads ALLOWED_ORIGINS env var on Render
-# Set ALLOWED_ORIGINS=https://your-app.vercel.app in Render dashboard
-# Leave it unset locally and it defaults to allow all (["*"])
 _raw = os.environ.get("ALLOWED_ORIGINS", "")
 allowed_origins = [o.strip() for o in _raw.split(",") if o.strip()] or ["*"]
 
@@ -53,7 +52,6 @@ app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"]
 def read_root():
     return {"message": "StockSense API — Running"}
 
-# Keep-alive endpoint — prevents Render free tier from sleeping
 @app.get("/ping")
 def ping():
     return {"status": "ok"}
