@@ -510,6 +510,8 @@ export default function InvestorPortfolio() {
   const [transactions, setTxns]     = useState([]);
   const [simResult, setSimResult]   = useState(null);
   const [symbol, setSymbol]         = useState('');
+  const [quoteData, setQuoteData]   = useState(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
   const [symbolSugg, setSymbolSugg] = useState([]);
   const [showSugg, setShowSugg]     = useState(false);
   const symbolRef = useRef(null);
@@ -560,6 +562,17 @@ export default function InvestorPortfolio() {
   }, []);
 
   const refresh = async () => { setRefreshing(true); await fetchData(); setRefreshing(false); };
+
+  const fetchQuote = async (sym) => {
+    if (!sym) { setQuoteData(null); return; }
+    setQuoteLoading(true);
+    try {
+      const searchSym = sym.includes('.') ? sym : `${sym}.NS`;
+      const res = await api.get(`/market/quote/${searchSym.toUpperCase()}`);
+      setQuoteData(res.data);
+    } catch { setQuoteData(null); }
+    finally { setQuoteLoading(false); }
+  };
 
   const handleTrade = async (type) => {
     if (!symbol || quantity <= 0) return;
@@ -830,7 +843,7 @@ export default function InvestorPortfolio() {
         </div>
 
         {/* Full-width horizontal form */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 200px 1fr 1fr', gap: '16px', alignItems: 'end' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px 160px 1fr 1fr', gap: '16px', alignItems: 'end' }}>
 
           {/* Symbol with autocomplete */}
           <div>
@@ -846,6 +859,7 @@ export default function InvestorPortfolio() {
                   } else { setSymbolSugg([]); setShowSugg(false); }
                 }}
                 onFocus={() => { if (symbol.length > 0) setShowSugg(true); }}
+                onBlur={() => { if (symbol.length >= 2) fetchQuote(symbol); }}
                 style={{ fontSize: '0.95rem', width: '100%', boxSizing: 'border-box', padding: '12px 16px', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '10px', color: '#f0f6ff', outline: 'none' }} />
               {showSugg && symbolSugg.length > 0 && (
                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#0f1623', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '10px', zIndex: 200, boxShadow: '0 16px 40px rgba(0,0,0,0.7)', overflow: 'hidden', marginTop: '4px' }}>
@@ -859,6 +873,27 @@ export default function InvestorPortfolio() {
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+          </div>
+
+          {/* Live Price Display */}
+          <div>
+            <div style={{ fontSize: '0.68rem', color: '#8899b4', marginBottom: '7px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Live Price</div>
+            <div style={{ padding: '12px 16px', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '10px', minHeight: '46px', display: 'flex', alignItems: 'center' }}>
+              {quoteLoading ? (
+                <span style={{ fontSize: '0.82rem', color: '#475569' }}>Fetching...</span>
+              ) : quoteData ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <span style={{ fontSize: '1.1rem', fontWeight: '800', color: '#f0f6ff' }}>
+                    ₹{Number(quoteData.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </span>
+                  <span style={{ fontSize: '0.72rem', fontWeight: '600', color: quoteData.percent_change >= 0 ? '#10b981' : '#f43f5e' }}>
+                    {quoteData.percent_change >= 0 ? '▲' : '▼'} {Math.abs(quoteData.percent_change).toFixed(2)}% today
+                  </span>
+                </div>
+              ) : (
+                <span style={{ fontSize: '0.82rem', color: '#334155' }}>Select a stock</span>
               )}
             </div>
           </div>
