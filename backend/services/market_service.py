@@ -174,6 +174,14 @@ def get_stock_quote(symbol: str) -> dict:
     if cached:
         return cached
 
+    # On Render/cloud servers NSE blocks requests — go straight to yfinance
+    import os
+    if os.environ.get("RENDER"):
+        result = _yfinance_quote(sym)
+        if result:
+            _cache_set(f"quote:{sym}", result)
+        return result
+
     # Skip NSE entirely if it has failed 3+ times recently — go straight to yfinance
     if _nse_fail_count.get('quote', 0) >= 3:
         result = _yfinance_quote(sym)
