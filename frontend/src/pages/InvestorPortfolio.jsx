@@ -843,7 +843,7 @@ export default function InvestorPortfolio() {
         </div>
 
         {/* Full-width horizontal form */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 160px 160px 1fr 1fr', gap: '16px', alignItems: 'end' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 150px 120px 1fr 1fr', gap: '16px', alignItems: 'end' }}>
 
           {/* Symbol with autocomplete */}
           <div>
@@ -901,7 +901,8 @@ export default function InvestorPortfolio() {
           {/* Quantity */}
           <div>
             <div style={{ fontSize: '0.68rem', color: '#8899b4', marginBottom: '7px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Quantity</div>
-            <input type="number" min="1" value={quantity} onChange={e => setQuantity(Number(e.target.value))}
+            <input type="number" min="1" step="1" value={quantity}
+              onChange={e => { const v = parseInt(e.target.value, 10); setQuantity(isNaN(v) || v < 1 ? 1 : v); }}
               style={{ fontSize: '0.95rem', width: '100%', boxSizing: 'border-box', padding: '12px 16px', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '10px', color: '#f0f6ff', outline: 'none' }} />
           </div>
 
