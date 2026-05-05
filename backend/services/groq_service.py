@@ -1,11 +1,25 @@
 import os
 import json
+import logging
 import groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = groq.Client(api_key=os.environ.get("GROQ_API_KEY", "fallback_key"))
+logger = logging.getLogger(__name__)
+
+# ── Hard crash at startup if GROQ_API_KEY is not set ─────────────────────────
+# A "fallback_key" silently fails every AI call with a 401 and gives the user
+# no useful error. Crash loudly at startup instead so the problem is obvious.
+_groq_api_key = os.environ.get("GROQ_API_KEY")
+if not _groq_api_key:
+    raise RuntimeError(
+        "[StockSense] FATAL: GROQ_API_KEY environment variable is not set. "
+        "Get a free key at https://console.groq.com and add it to your .env file:\n"
+        "  GROQ_API_KEY=gsk_..."
+    )
+
+client = groq.Client(api_key=_groq_api_key)
 
 
 def generate_trader_thesis(symbol: str, price: float, news: list, options_data: dict = None, technicals: dict = None) -> str:
@@ -116,14 +130,14 @@ IMPORTANT: Use exact rupee amounts. Entry must be close to current price ₹{pri
 
 def generate_investor_thesis(symbol: str, price: float, news: list, fundamentals: dict = None, holding_days: int = None, technicals: dict = None) -> str:
     news_text = "\n".join([f"- {n['headline']}" for n in news[:4]]) if news else "No recent news available."
-    
+
     fund_text = ""
     if fundamentals:
         pe = fundamentals.get('pe_ratio')
         pe_str = f"{pe:.1f}x" if pe else "Not available"
         mktcap = fundamentals.get('market_cap', 0)
         mktcap_str = f"₹{mktcap/1e7:.0f} Crores" if mktcap and mktcap > 1e7 else f"₹{mktcap/1e5:.0f} Lakhs" if mktcap else "N/A"
-        
+
         fund_text = f"""
 Key Numbers:
 - P/E Ratio: {pe_str} (lower = cheaper relative to earnings; market average ~22x)
@@ -134,9 +148,10 @@ Key Numbers:
 - Beta: {fundamentals.get('beta', 'N/A')} (market sensitivity; <1 = less volatile than Nifty)
 - Sector: {fundamentals.get('sector', 'N/A')}"""
 
-    is_short_term = False  # Investment mode is always long-term (min 3 months)
+    # ── FIX: was hardcoded False — now correctly detects short-term holding ──
+    is_short_term = holding_days is not None and holding_days <= 90
 
-    # Technical context for short-term
+    # Technical context (used for short-term thesis)
     tech_text = ""
     if technicals and is_short_term:
         rsi = technicals.get('rsi')
@@ -146,20 +161,22 @@ Key Numbers:
         ma50 = technicals.get('ma50')
         mom5 = technicals.get('mom5')
         atr_pct = technicals.get('atr_pct')
-        overall = technicals.get('overall','HOLD')
+        overall = technicals.get('overall', 'HOLD')
         tech_text = f"""
 Technical Picture (from live chart):
-- RSI: {rsi:.1f if rsi else 'N/A'} ({'Oversold — potential bounce' if rsi and rsi < 30 else 'Overbought — caution' if rsi and rsi > 70 else 'Neutral'})
+- RSI: {f"{rsi:.1f}" if rsi else "N/A"} ({'Oversold — potential bounce' if rsi and rsi < 30 else 'Overbought — caution' if rsi and rsi > 70 else 'Neutral'})
 - MACD: {'Bullish crossover — momentum building' if macd and signal and macd > signal else 'Bearish — momentum fading'}
 - Price vs MA20: {'Above (short-term uptrend)' if ma20 and price > ma20 else 'Below (short-term downtrend)'}
 - Price vs MA50: {'Above (medium-term strength)' if ma50 and price > ma50 else 'Below (medium-term weak)'}
-- 5-Day Momentum: {'+' if mom5 and mom5 > 0 else ''}{mom5:.1f if mom5 else 'N/A'}%
-- Daily Volatility (ATR): {atr_pct:.1f if atr_pct else 'N/A'}% of price
+- 5-Day Momentum: {'+' if mom5 and mom5 > 0 else ''}{f"{mom5:.1f}" if mom5 else "N/A"}%
+- Daily Volatility (ATR): {f"{atr_pct:.1f}" if atr_pct else "N/A"}% of price
 - Overall Signal: {overall}"""
 
     horizon_text = ""
     if holding_days:
-        if holding_days <= 180:
+        if holding_days <= 90:
+            horizon_text = f"\nInvestment Horizon: ~{holding_days} days. Focus on near-term chart and momentum."
+        elif holding_days <= 180:
             horizon_text = f"\nInvestment Horizon: ~{holding_days//30} months. Focus on near-term business performance and catalysts."
         elif holding_days <= 365:
             horizon_text = f"\nInvestment Horizon: 1 year. Look at business fundamentals, earnings trajectory and sector trends."
@@ -168,7 +185,6 @@ Technical Picture (from live chart):
         else:
             horizon_text = f"\nInvestment Horizon: {holding_days//365}+ years. This is long-term wealth creation — focus on compounding, management quality and industry position."
 
-    # Use different prompt based on holding period
     if is_short_term:
         prompt = f"""You are StockSense AI — a sharp, data-driven analyst. The user wants to hold for {holding_days} days only — this is a SHORT-TERM trade, not long-term investment.
 
@@ -246,7 +262,6 @@ One paragraph on what to expect, what news to watch for, and what the price migh
 One clear, specific action recommendation for someone investing for the first time.
 
 Use ₹ for all prices. Write in plain English. Be honest about uncertainties."""
-    # end of else block
 
     response = client.chat.completions.create(
         messages=[
@@ -260,6 +275,7 @@ Use ₹ for all prices. Write in plain English. Be honest about uncertainties.""
 
 
 def generate_investment_thesis(symbol: str, price: float, news: list) -> str:
+    """Backward-compat wrapper."""
     return generate_investor_thesis(symbol, price, news)
 
 
@@ -319,7 +335,7 @@ Only output the raw JSON array of strings, nothing else. No markdown, no explana
             return symbols
         return []
     except Exception as e:
-        print(f"Screener error: {e}")
+        logger.error(f"[Screener] Error: {e}")
         return []
 
 
@@ -363,7 +379,7 @@ Make sure percentages add up to 100. Use only Indian investment options (NSE sto
         result = json.loads(content)
         return result
     except Exception as e:
-        print(f"Allocation error: {e}")
+        logger.error(f"[Allocation] Error: {e}")
         return {
             "summary": "AI allocation service temporarily unavailable. Please try again.",
             "allocations": [],
@@ -422,5 +438,5 @@ Only output the JSON. No markdown, no explanation."""
             "headlines": headlines,
         }
     except Exception as e:
-        print(f"News sentiment error for {symbol}: {e}")
+        logger.error(f"[Sentiment] Error for {symbol}: {e}")
         return {"symbol": symbol, "sentiment": "Neutral", "score": 0, "summary": "Could not analyze news.", "headlines": headlines, "keywords": []}
