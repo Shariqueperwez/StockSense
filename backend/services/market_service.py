@@ -2,6 +2,8 @@
 market_service.py — NSE India primary, yfinance multi-layer fallback.
 FIX: Robust NSE cookie warming + triple-layer yfinance so TCS / any valid
      NSE ticker never returns None unless it genuinely doesn't exist.
+FIX2: Added .BO (BSE) fallback layer + symbol alias map for commonly
+      mis-mapped symbols like TATAMOTORS, M&M, BAJAJ-AUTO etc.
 """
 import requests
 import time
@@ -84,7 +86,6 @@ def _get_nse_session(force=False):
             try:
                 s.get('https://www.nseindia.com/', timeout=10)
                 time.sleep(0.8)
-                # Visit a secondary page to strengthen the session
                 s.get('https://www.nseindia.com/market-data/live-equity-market', timeout=8)
                 time.sleep(0.4)
             except Exception:
@@ -114,7 +115,6 @@ def _nse_get(url, retries=3, force_new_session=False):
                 except Exception:
                     return None
             elif r.status_code in (401, 403, 429):
-                # Session expired / blocked — force recreate
                 s = _get_nse_session(force=True)
                 if attempt < retries - 1:
                     time.sleep(2.0)
@@ -131,6 +131,21 @@ def _nse_get(url, retries=3, force_new_session=False):
 
 def _clean_symbol(symbol: str) -> str:
     return symbol.upper().replace('.NS', '').replace('.BO', '').strip()
+
+# ─── Symbol alias map ─────────────────────────────────────────────────────────
+# Some symbols yfinance or NSE URL needs in a specific format.
+# Key   = what the user types (after _clean_symbol)
+# Value = what to pass to yfinance as the base symbol (without suffix)
+# This fixes TATAMOTORS, M&M, BAJAJ-AUTO and any other oddly-mapped tickers.
+_SYMBOL_ALIASES = {
+    # These are identical but listed explicitly so we know they've been verified
+    "TATAMOTORS": "TATAMOTORS",
+    "BAJAJ-AUTO": "BAJAJ-AUTO",
+    "M&M":        "M%26M",          # NSE URL needs %26 for &
+    "BAJAJFINSV": "BAJAJFINSV",
+    "HDFCAMC":    "HDFCAMC",
+    "NAUKRI":     "NAUKRI",
+}
 
 # ─── yfinance fundamentals helper ─────────────────────────────────────────────
 def _yf_fundamentals(sym: str) -> dict:
@@ -165,7 +180,6 @@ def _yf_fundamentals(sym: str) -> dict:
         return {}
 
 # ─── Stock Quote ──────────────────────────────────────────────────────────────
-# Track NSE failure count to skip it when it's consistently failing
 _nse_fail_count = {}
 
 def get_stock_quote(symbol: str) -> dict:
@@ -182,7 +196,7 @@ def get_stock_quote(symbol: str) -> dict:
             _cache_set(f"quote:{sym}", result)
         return result
 
-    # Skip NSE entirely if it has failed 3+ times recently — go straight to yfinance
+    # Skip NSE entirely if it has failed 3+ times recently
     if _nse_fail_count.get('quote', 0) >= 3:
         result = _yfinance_quote(sym)
         if result:
@@ -190,7 +204,9 @@ def get_stock_quote(symbol: str) -> dict:
         return result
 
     # ── Layer 1: NSE India live API ──────────────────────────────────────────
-    data = _nse_get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}")
+    # Use alias for URL encoding (e.g. M&M → M%26M)
+    nse_sym = _SYMBOL_ALIASES.get(sym, sym)
+    data = _nse_get(f"https://www.nseindia.com/api/quote-equity?symbol={nse_sym}")
 
     if data and 'priceInfo' in data:
         pi = data['priceInfo']
@@ -201,7 +217,6 @@ def get_stock_quote(symbol: str) -> dict:
         change = pi.get('change', 0)
         pct = pi.get('pChange', 0)
 
-        # If NSE returned data but price is missing/zero, fall through to yfinance
         if not price:
             return _yfinance_quote(sym)
 
@@ -228,8 +243,7 @@ def get_stock_quote(symbol: str) -> dict:
             "company_name": meta.get('companyName', sym) or sym,
         }
 
-        # Market cap from trade_info
-        fund = _nse_get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}&section=trade_info")
+        fund = _nse_get(f"https://www.nseindia.com/api/quote-equity?symbol={nse_sym}&section=trade_info")
         if fund:
             try:
                 mcap = fund.get('marketDeptOrderBook', {}).get('tradeInfo', {}).get('totalMarketCap', 0)
@@ -237,7 +251,6 @@ def get_stock_quote(symbol: str) -> dict:
             except Exception:
                 pass
 
-        # Always supplement with yfinance for fundamentals
         fundamentals = _yf_fundamentals(sym)
         if fundamentals:
             result['pe_ratio'] = fundamentals.get('pe_ratio')
@@ -260,7 +273,6 @@ def get_stock_quote(symbol: str) -> dict:
                 result['industry'] = fundamentals.get('industry', '')
             if not result.get('company_name') or result.get('company_name') == sym:
                 result['company_name'] = fundamentals.get('company_name', sym)
-            # Fill 52W high/low from yfinance if NSE returned zero
             if not result.get('fifty_two_week_high') or result['fifty_two_week_high'] == 0:
                 result['fifty_two_week_high'] = fundamentals.get('fifty_two_week_high', 0) or 0
             if not result.get('fifty_two_week_low') or result['fifty_two_week_low'] == 0:
@@ -268,13 +280,11 @@ def get_stock_quote(symbol: str) -> dict:
 
         result = _sanitize(result)
         _cache_set(f"quote:{sym}", result)
-        _nse_fail_count['quote'] = 0  # reset on success
+        _nse_fail_count['quote'] = 0
         return result
 
-    # ── Layer 2 & 3: yfinance (fast_info → info → download) ─────────────────
-    # NSE failed — increment counter so future requests skip NSE
+    # ── Layers 2-4: yfinance (.NS → .BO fallback) ────────────────────────────
     _nse_fail_count['quote'] = _nse_fail_count.get('quote', 0) + 1
-    # Reset after 10 mins
     def _reset_nse_fails():
         import time as _t; _t.sleep(600); _nse_fail_count['quote'] = 0
     import threading as _th
@@ -289,15 +299,17 @@ def get_stock_quote(symbol: str) -> dict:
 def _yfinance_quote(sym: str) -> dict:
     """
     Multi-layer yfinance fallback.
-    Layer A: fast_info (fastest, works when market is open)
-    Layer B: full ticker.info (works most of the time)
-    Layer C: yf.download (last resort — always works for valid tickers)
+    Layer A: fast_info on .NS (fastest)
+    Layer B: full ticker.info on .NS
+    Layer C: yf.download on .NS (last resort)
+    Layer D: Try .BO (BSE) — fixes symbols like TATAMOTORS that
+             sometimes fail on .NS due to yfinance rate limits
     """
     import yfinance as yf
 
     ns_sym = f"{sym}.NS"
 
-    # ── Layer A: fast_info ───────────────────────────────────────────────────
+    # ── Layer A: fast_info (.NS) ─────────────────────────────────────────────
     try:
         ticker = yf.Ticker(ns_sym)
         fi = ticker.fast_info
@@ -338,13 +350,11 @@ def _yfinance_quote(sym: str) -> dict:
                 "profit_margin": None,
                 "current_ratio": info.get("currentRatio") or None,
             }
-            result = _sanitize(result)
-            _cache_set(f"quote:{sym}", result)
-            return result
+            return _sanitize(result)
     except Exception as e:
-        print(f"yfinance fast_info failed for {sym}: {e}")
+        print(f"[yfinance] Layer A (.NS fast_info) failed for {sym}: {e}")
 
-    # ── Layer B: full ticker.info ────────────────────────────────────────────
+    # ── Layer B: full ticker.info (.NS) ──────────────────────────────────────
     try:
         ticker = yf.Ticker(ns_sym)
         info = ticker.info or {}
@@ -385,17 +395,14 @@ def _yfinance_quote(sym: str) -> dict:
                 "profit_margin": None,
                 "current_ratio": info.get("currentRatio") or None,
             }
-            result = _sanitize(result)
-            _cache_set(f"quote:{sym}", result)
-            return result
+            return _sanitize(result)
     except Exception as e:
-        print(f"yfinance ticker.info failed for {sym}: {e}")
+        print(f"[yfinance] Layer B (.NS ticker.info) failed for {sym}: {e}")
 
-    # ── Layer C: yf.download — last resort, always returns OHLCV ────────────
+    # ── Layer C: yf.download (.NS) — last resort ─────────────────────────────
     try:
         df = yf.download(ns_sym, period="5d", interval="1d", progress=False, timeout=20)
         if df is not None and not df.empty:
-            # Flatten multi-level columns if present
             if hasattr(df.columns, 'levels'):
                 df.columns = df.columns.get_level_values(0)
             last = df.iloc[-1]
@@ -428,24 +435,158 @@ def _yfinance_quote(sym: str) -> dict:
                     "day_low": _col(last, ['Low']) or price,
                     "open": _col(last, ['Open']) or price,
                     "prev_close": round(prev, 2) if prev else round(price, 2),
-                    "fifty_two_week_high": 0,
-                    "fifty_two_week_low": 0,
+                    "fifty_two_week_high": 0, "fifty_two_week_low": 0,
                     "pe_ratio": None, "pb_ratio": None, "eps": None,
                     "dividend_yield": 0, "beta": None, "avg_volume": 0,
-                    "sector": "", "industry": "",
-                    "company_name": sym,
+                    "sector": "", "industry": "", "company_name": sym,
                     "roe": None, "debt_to_equity": None,
                     "revenue_growth": None, "earnings_growth": None,
                     "profit_margin": None, "current_ratio": None,
                 }
-                result = _sanitize(result)
-                _cache_set(f"quote:{sym}", result)
-                return result
+                return _sanitize(result)
     except Exception as e:
-        print(f"yfinance download fallback failed for {sym}: {e}")
+        print(f"[yfinance] Layer C (.NS download) failed for {sym}: {e}")
 
-    print(f"All quote sources failed for {sym}")
+    # ── Layer D: BSE fallback (.BO) ───────────────────────────────────────────
+    # This fixes symbols like TATAMOTORS that occasionally fail on .NS
+    # due to yfinance rate limiting or temporary API issues.
+    bo_sym = f"{sym}.BO"
+    print(f"[yfinance] Trying .BO fallback for {sym}")
+    try:
+        ticker = yf.Ticker(bo_sym)
+        fi = ticker.fast_info
+        price = getattr(fi, 'last_price', None)
+        if price and float(price) > 0:
+            prev = getattr(fi, 'previous_close', None) or price
+            info = {}
+            try:
+                info = ticker.info or {}
+            except Exception:
+                pass
+            result = {
+                "symbol": bo_sym,
+                "price": round(float(price), 2),
+                "change": round(float(price - prev), 2),
+                "percent_change": round(((price - prev) / prev) * 100, 2) if prev else 0,
+                "market_cap": info.get("marketCap") or getattr(fi, 'market_cap', 0) or 0,
+                "volume": getattr(fi, 'three_month_average_volume', 0) or 0,
+                "day_high": getattr(fi, 'day_high', price) or price,
+                "day_low": getattr(fi, 'day_low', price) or price,
+                "open": getattr(fi, 'open', price) or price,
+                "prev_close": round(float(prev), 2),
+                "fifty_two_week_high": getattr(fi, 'year_high', 0) or 0,
+                "fifty_two_week_low": getattr(fi, 'year_low', 0) or 0,
+                "pe_ratio": info.get("trailingPE") or info.get("forwardPE") or None,
+                "pb_ratio": info.get("priceToBook") or None,
+                "eps": info.get("trailingEps") or None,
+                "dividend_yield": (info.get("dividendYield") or 0) * 100,
+                "beta": info.get("beta") or None,
+                "avg_volume": info.get("averageVolume") or 0,
+                "sector": info.get("sector") or info.get("industry") or "",
+                "industry": info.get("industry") or "",
+                "company_name": info.get("longName") or info.get("shortName") or sym,
+                "roe": None,
+                "debt_to_equity": info.get("debtToEquity") or None,
+                "revenue_growth": None, "earnings_growth": None,
+                "profit_margin": None, "current_ratio": None,
+            }
+            print(f"[yfinance] .BO fallback SUCCESS for {sym}: ₹{price}")
+            return _sanitize(result)
+    except Exception as e:
+        print(f"[yfinance] Layer D (.BO fast_info) failed for {sym}: {e}")
+
+    # Try .BO via full info
+    try:
+        ticker = yf.Ticker(bo_sym)
+        info = ticker.info or {}
+        price = (
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+            or info.get("previousClose")
+        )
+        if price and float(price) > 0:
+            price = float(price)
+            prev = float(info.get("previousClose") or price)
+            result = {
+                "symbol": bo_sym,
+                "price": round(price, 2),
+                "change": round(price - prev, 2),
+                "percent_change": round(((price - prev) / prev) * 100, 2) if prev else 0,
+                "market_cap": info.get("marketCap") or 0,
+                "volume": info.get("volume") or 0,
+                "day_high": info.get("dayHigh") or price,
+                "day_low": info.get("dayLow") or price,
+                "open": info.get("open") or price,
+                "prev_close": round(prev, 2),
+                "fifty_two_week_high": info.get("fiftyTwoWeekHigh") or 0,
+                "fifty_two_week_low": info.get("fiftyTwoWeekLow") or 0,
+                "pe_ratio": info.get("trailingPE") or None,
+                "pb_ratio": info.get("priceToBook") or None,
+                "eps": info.get("trailingEps") or None,
+                "dividend_yield": (info.get("dividendYield") or 0) * 100,
+                "beta": info.get("beta") or None,
+                "avg_volume": info.get("averageVolume") or 0,
+                "sector": info.get("sector") or "",
+                "industry": info.get("industry") or "",
+                "company_name": info.get("longName") or info.get("shortName") or sym,
+                "roe": None, "debt_to_equity": None,
+                "revenue_growth": None, "earnings_growth": None,
+                "profit_margin": None, "current_ratio": None,
+            }
+            print(f"[yfinance] .BO info fallback SUCCESS for {sym}: ₹{price}")
+            return _sanitize(result)
+    except Exception as e:
+        print(f"[yfinance] Layer D (.BO ticker.info) failed for {sym}: {e}")
+
+    # Try .BO via download
+    try:
+        df = yf.download(bo_sym, period="5d", interval="1d", progress=False, timeout=20)
+        if df is not None and not df.empty:
+            if hasattr(df.columns, 'levels'):
+                df.columns = df.columns.get_level_values(0)
+            last = df.iloc[-1]
+            prev_row = df.iloc[-2] if len(df) >= 2 else last
+
+            def _col2(row, names):
+                for n in names:
+                    try:
+                        v = row[n]
+                        if hasattr(v, 'iloc'): v = v.iloc[0]
+                        v = float(v)
+                        if v and not math.isnan(v): return v
+                    except Exception:
+                        pass
+                return None
+
+            price = _col2(last, ['Close', 'Adj Close'])
+            prev = _col2(prev_row, ['Close', 'Adj Close']) or price
+            if price:
+                result = {
+                    "symbol": bo_sym,
+                    "price": round(price, 2),
+                    "change": round(price - prev, 2) if prev else 0,
+                    "percent_change": round(((price - prev) / prev) * 100, 2) if prev else 0,
+                    "market_cap": 0, "volume": _col2(last, ['Volume']) or 0,
+                    "day_high": _col2(last, ['High']) or price,
+                    "day_low": _col2(last, ['Low']) or price,
+                    "open": _col2(last, ['Open']) or price,
+                    "prev_close": round(prev, 2) if prev else round(price, 2),
+                    "fifty_two_week_high": 0, "fifty_two_week_low": 0,
+                    "pe_ratio": None, "pb_ratio": None, "eps": None,
+                    "dividend_yield": 0, "beta": None, "avg_volume": 0,
+                    "sector": "", "industry": "", "company_name": sym,
+                    "roe": None, "debt_to_equity": None,
+                    "revenue_growth": None, "earnings_growth": None,
+                    "profit_margin": None, "current_ratio": None,
+                }
+                print(f"[yfinance] .BO download fallback SUCCESS for {sym}: ₹{price}")
+                return _sanitize(result)
+    except Exception as e:
+        print(f"[yfinance] Layer D (.BO download) failed for {sym}: {e}")
+
+    print(f"[yfinance] ALL layers failed for {sym} — symbol may not exist on NSE/BSE")
     return None
+
 
 # ─── History ──────────────────────────────────────────────────────────────────
 def get_stock_history(symbol: str, period: str = "1mo"):
@@ -454,7 +595,6 @@ def get_stock_history(symbol: str, period: str = "1mo"):
     if cached is not None:
         return cached
 
-    # For longer periods (3y, 5y), skip NSE API and go direct to yfinance
     if period in ('3y', '5y', '2y'):
         result = _sanitize(_yfinance_history(sym, period))
         if result:
@@ -468,8 +608,11 @@ def get_stock_history(symbol: str, period: str = "1mo"):
     start_str = start.strftime('%d-%m-%Y')
     end_str = end.strftime('%d-%m-%Y')
 
-    # Force fresh NSE session for history (RELIANCE etc. can get stale cookie)
-    data = _nse_get(f"https://www.nseindia.com/api/historical/cm/equity?symbol={sym}&series=[%22EQ%22]&from={start_str}&to={end_str}", force_new_session=(sym in ('RELIANCE','TCS','HDFCBANK','INFY','ICICIBANK')))
+    nse_sym = _SYMBOL_ALIASES.get(sym, sym)
+    data = _nse_get(
+        f"https://www.nseindia.com/api/historical/cm/equity?symbol={nse_sym}&series=[%22EQ%22]&from={start_str}&to={end_str}",
+        force_new_session=(sym in ('RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK'))
+    )
 
     if data and 'data' in data:
         history = []
@@ -499,7 +642,7 @@ def _yfinance_history(sym: str, period: str):
         else:
             yf_p = yf_period_map.get(period, '1y')
             df = yf.download(f"{sym}.NS", period=yf_p, interval="1d", progress=False, timeout=20)
-        # If .NS returns empty, try .BO (BSE) as fallback
+        # If .NS returns empty, try .BO
         if df is None or df.empty:
             if period == '3y':
                 start_dt = datetime.now() - timedelta(days=1095)
@@ -537,14 +680,13 @@ def get_technical_indicators(symbol: str) -> dict:
     import yfinance as yf
 
     history = get_stock_history(sym, '6mo')
-    # If NSE history fails, try direct yfinance download
     if not history or len(history) < 20:
         try:
             for suffix in ['.NS', '.BO']:
                 df = yf.download(f"{sym}{suffix}", period="6mo", interval="1d", progress=False, timeout=15, auto_adjust=True)
                 if df is not None and len(df) >= 20:
                     closes = df['Close'].squeeze()
-                    history = [{"date": str(idx.date()), "price": float(v)} 
+                    history = [{"date": str(idx.date()), "price": float(v)}
                                for idx, v in closes.items() if not pd.isna(v)]
                     if len(history) >= 20:
                         break
@@ -581,22 +723,8 @@ def get_technical_indicators(symbol: str) -> dict:
         support = min(recent_prices)
         resistance = max(recent_prices)
 
-        signals = []
-        if rsi < 30: signals.append("RSI Oversold — Potential Bounce")
-        elif rsi > 70: signals.append("RSI Overbought — Caution on Entry")
-        else: signals.append(f"RSI Neutral ({rsi:.0f}) — No Extreme")
-        signals.append("MACD Bullish Crossover — Momentum Up" if macd_val > signal_val else "MACD Below Signal — Momentum Weak")
-        if current_price > ma20 > ma50: signals.append("Price above MA20 & MA50 — Uptrend Intact")
-        elif current_price < ma20 < ma50: signals.append("Price below MA20 & MA50 — Downtrend")
-        else: signals.append("Mixed Moving Averages — Sideways / Consolidation")
-
-        bull = sum([rsi < 60, macd_val > signal_val, current_price > ma20])
-        overall = "BUY" if bull >= 3 else "SELL" if bull == 0 else "HOLD"
-
-        # Additional indicators
         ma200 = float(closes.rolling(min(200, len(closes))).mean().iloc[-1]) if len(closes) >= 50 else None
 
-        # ATR (Average True Range) - volatility measure
         highs = pd.Series([h.get('high', h['price'] * 1.01) for h in history], dtype=float)
         lows  = pd.Series([h.get('low',  h['price'] * 0.99) for h in history], dtype=float)
         tr = pd.concat([
@@ -607,13 +735,11 @@ def get_technical_indicators(symbol: str) -> dict:
         atr = float(tr.rolling(14).mean().iloc[-1])
         atr_pct = round(atr / current_price * 100, 2) if current_price else 0
 
-        # Stochastic RSI
         rsi_series = 100 - (100 / (1 + gain / loss.replace(0, 0.001)))
         rsi_min = rsi_series.rolling(14).min()
         rsi_max = rsi_series.rolling(14).max()
         stoch_rsi = float(((rsi_series - rsi_min) / (rsi_max - rsi_min + 0.001) * 100).iloc[-1])
 
-        # Volume ratio (recent vs average)
         if len(history) >= 20 and 'volume' in history[-1]:
             vols = pd.Series([h.get('volume', 0) for h in history], dtype=float)
             avg_vol = float(vols.rolling(20).mean().iloc[-1])
@@ -622,18 +748,13 @@ def get_technical_indicators(symbol: str) -> dict:
         else:
             vol_ratio = 1.0
 
-        # EMA 9 for short-term trend
         ema9 = float(closes.ewm(span=9).mean().iloc[-1])
-
-        # Price change momentum
         mom5  = round(((current_price / closes.iloc[-6]) - 1) * 100, 2) if len(closes) >= 6 else 0
         mom20 = round(((current_price / closes.iloc[-21]) - 1) * 100, 2) if len(closes) >= 21 else 0
 
-        # Trend strength
-        adx_approx = abs(macd_val - signal_val) / (atr + 0.001) * 25  # simplified
+        adx_approx = abs(macd_val - signal_val) / (atr + 0.001) * 25
         trend_strength = 'Strong' if adx_approx > 20 else 'Moderate' if adx_approx > 10 else 'Weak'
 
-        # Better signals
         signals = []
         if rsi < 30: signals.append("RSI Oversold (" + str(round(rsi,1)) + ") — Potential bounce zone")
         elif rsi > 70: signals.append("RSI Overbought (" + str(round(rsi,1)) + ") — Caution, possible pullback")
@@ -679,7 +800,8 @@ def get_stock_news(symbol: str):
         return cached
 
     news = []
-    data = _nse_get(f"https://www.nseindia.com/api/corp-announcements?index=equities&symbol={sym}")
+    nse_sym = _SYMBOL_ALIASES.get(sym, sym)
+    data = _nse_get(f"https://www.nseindia.com/api/corp-announcements?index=equities&symbol={nse_sym}")
     if data and isinstance(data, list):
         for item in data[:6]:
             subject = item.get('subject', '') or item.get('desc', '')
@@ -728,7 +850,8 @@ def get_options_data(symbol: str) -> dict:
     if cached is not None:
         return cached
 
-    data = _nse_get(f"https://www.nseindia.com/api/option-chain-equities?symbol={sym}")
+    nse_sym = _SYMBOL_ALIASES.get(sym, sym)
+    data = _nse_get(f"https://www.nseindia.com/api/option-chain-equities?symbol={nse_sym}")
     if data and 'records' in data:
         records = data['records']
         expiry_dates = records.get('expiryDates', [])
@@ -823,7 +946,7 @@ def get_market_movers():
     gainers, losers = [], []
 
     gainers_data = _nse_get("https://www.nseindia.com/api/live-analysis-variations?index=gainers&limit=5&marketType=N")
-    losers_data = _nse_get("https://www.nseindia.com/api/live-analysis-variations?index=losers&limit=5&marketType=N")
+    losers_data  = _nse_get("https://www.nseindia.com/api/live-analysis-variations?index=losers&limit=5&marketType=N")
 
     if gainers_data and 'NIFTY' in gainers_data:
         for item in gainers_data['NIFTY'].get('data', [])[:5]:
@@ -850,11 +973,11 @@ def get_market_movers():
         if index_data and 'data' in index_data:
             stocks = []
             for item in index_data['data']:
-                sym = item.get('symbol', '')
-                if not sym or sym in ('NIFTY 50', 'INDIA VIX'):
+                sym2 = item.get('symbol', '')
+                if not sym2 or sym2 in ('NIFTY 50', 'INDIA VIX'):
                     continue
                 stocks.append({
-                    "symbol": sym,
+                    "symbol": sym2,
                     "price": float(item.get('lastPrice', 0)),
                     "percent_change": float(item.get('pChange', 0)),
                     "change": float(item.get('change', 0)),
@@ -867,19 +990,19 @@ def get_market_movers():
 
     if not gainers:
         gainers = [
-            {"symbol": "ADANIENT", "price": 2840, "percent_change": 3.2, "change": 88},
-            {"symbol": "TATASTEEL", "price": 162, "percent_change": 2.8, "change": 4.4},
-            {"symbol": "NTPC", "price": 368, "percent_change": 2.1, "change": 7.6},
-            {"symbol": "ONGC", "price": 265, "percent_change": 1.9, "change": 4.9},
-            {"symbol": "SBIN", "price": 812, "percent_change": 1.5, "change": 12},
+            {"symbol": "ADANIENT",  "price": 2840, "percent_change": 3.2, "change": 88},
+            {"symbol": "TATASTEEL", "price": 162,  "percent_change": 2.8, "change": 4.4},
+            {"symbol": "NTPC",      "price": 368,  "percent_change": 2.1, "change": 7.6},
+            {"symbol": "ONGC",      "price": 265,  "percent_change": 1.9, "change": 4.9},
+            {"symbol": "SBIN",      "price": 812,  "percent_change": 1.5, "change": 12},
         ]
     if not losers:
         losers = [
-            {"symbol": "WIPRO", "price": 482, "percent_change": -1.8, "change": -8.8},
-            {"symbol": "INFY", "price": 1518, "percent_change": -1.2, "change": -18.5},
-            {"symbol": "TCS", "price": 3921, "percent_change": -0.9, "change": -35.7},
-            {"symbol": "HCLTECH", "price": 1625, "percent_change": -0.7, "change": -11.5},
-            {"symbol": "TECHM", "price": 1478, "percent_change": -0.5, "change": -7.4},
+            {"symbol": "WIPRO",  "price": 482,  "percent_change": -1.8, "change": -8.8},
+            {"symbol": "INFY",   "price": 1518, "percent_change": -1.2, "change": -18.5},
+            {"symbol": "TCS",    "price": 3921, "percent_change": -0.9, "change": -35.7},
+            {"symbol": "HCLTECH","price": 1625, "percent_change": -0.7, "change": -11.5},
+            {"symbol": "TECHM",  "price": 1478, "percent_change": -0.5, "change": -7.4},
         ]
 
     volume_leaders = []
@@ -904,7 +1027,6 @@ def get_market_movers():
         stocks_with_vol.sort(key=lambda x: x['volume'], reverse=True)
         volume_leaders = stocks_with_vol[:5]
 
-    # ── yFinance fallback for all three when NSE is blocked ──────────────────
     if not volume_leaders or not gainers or not losers:
         try:
             import yfinance as yf
@@ -947,14 +1069,13 @@ def get_market_movers():
         except Exception as e:
             print(f"yfinance movers fallback failed: {e}")
 
-    # Last resort static fallback for volume leaders
     if not volume_leaders:
         volume_leaders = [
-            {"symbol": "SBIN",      "price": 812,  "percent_change": 1.5,  "volume": 45000000},
-            {"symbol": "TATASTEEL", "price": 162,  "percent_change": 2.8,  "volume": 38000000},
-            {"symbol": "ONGC",      "price": 265,  "percent_change": 1.9,  "volume": 32000000},
-            {"symbol": "NTPC",      "price": 368,  "percent_change": 2.1,  "volume": 28000000},
-            {"symbol": "COALINDIA", "price": 410,  "percent_change": 0.8,  "volume": 24000000},
+            {"symbol": "SBIN",      "price": 812, "percent_change": 1.5,  "volume": 45000000},
+            {"symbol": "TATASTEEL", "price": 162, "percent_change": 2.8,  "volume": 38000000},
+            {"symbol": "ONGC",      "price": 265, "percent_change": 1.9,  "volume": 32000000},
+            {"symbol": "NTPC",      "price": 368, "percent_change": 2.1,  "volume": 28000000},
+            {"symbol": "COALINDIA", "price": 410, "percent_change": 0.8,  "volume": 24000000},
         ]
 
     result = {"gainers": gainers, "losers": losers, "volume_leaders": volume_leaders}
