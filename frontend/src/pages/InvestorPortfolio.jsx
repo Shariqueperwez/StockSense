@@ -653,9 +653,13 @@ export default function InvestorPortfolio() {
               {quoteLoading ? (
                 <span style={{ fontSize: '0.82rem', color: '#475569' }}>Fetching...</span>
               ) : quoteData ? (
-                <div>
-                  <div style={{ fontSize: '1rem', fontWeight: '800', color: '#f0f6ff', lineHeight: 1.1 }}>₹{Number(quoteData.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}</div>
-                  <div style={{ fontSize: '0.68rem', fontWeight: '600', color: quoteData.percent_change >= 0 ? '#10b981' : '#f43f5e' }}>{quoteData.percent_change >= 0 ? '▲' : '▼'} {Math.abs(quoteData.percent_change).toFixed(2)}%</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}>
+                  <span style={{ fontSize: '1rem', fontWeight: '800', color: '#f0f6ff' }}>
+                    ₹{Number(quoteData.price).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </span>
+                  <span style={{ fontSize: '0.72rem', fontWeight: '700', color: quoteData.percent_change >= 0 ? '#10b981' : '#f43f5e', background: quoteData.percent_change >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(244,63,94,0.12)', padding: '2px 7px', borderRadius: '20px', whiteSpace: 'nowrap' }}>
+                    {quoteData.percent_change >= 0 ? '▲' : '▼'} {Math.abs(quoteData.percent_change).toFixed(2)}%
+                  </span>
                 </div>
               ) : (
                 <span style={{ fontSize: '0.82rem', color: '#334155' }}>Select a stock</span>
